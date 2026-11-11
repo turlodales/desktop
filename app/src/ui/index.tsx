@@ -4,6 +4,8 @@ import * as React from 'react'
 import * as ReactDOM from 'react-dom'
 import * as Path from 'path'
 import { App } from './app'
+import { API } from '../lib/api'
+import { installAuthenticatedImageTokenHandler } from '../lib/authenticated-image-token-handler'
 import {
   Dispatcher,
   externalEditorErrorHandler,
@@ -21,11 +23,13 @@ import {
   samlReauthRequired,
   insufficientGitHubRepoPermissions,
   discardChangesHandler,
+  secretScanningPushProtectionErrorHandler,
 } from './dispatcher'
 import {
   AppStore,
   GitHubUserStore,
   CloningRepositoriesStore,
+  CopilotStore,
   IssuesStore,
   SignInStore,
   RepositoriesStore,
@@ -115,11 +119,11 @@ if (__DARWIN__) {
 let currentState: IAppState | null = null
 
 const sendErrorWithContext = (
-  error: Error,
+  e: unknown,
   context: Record<string, string> = {},
   nonFatal?: boolean
 ) => {
-  error = withSourceMappedStack(error)
+  const error = withSourceMappedStack(e)
 
   console.error('Uncaught exception', error)
 
@@ -176,7 +180,7 @@ const sendErrorWithContext = (
           supportsSystemThemeChanges()
         }`
       }
-    } catch (err) {
+    } catch {
       /* ignore */
     }
 
@@ -184,10 +188,38 @@ const sendErrorWithContext = (
   }
 }
 
-process.once('uncaughtException', (error: Error) => {
+const resizeLoopCompletedMessage =
+  'ResizeObserver loop completed with undelivered notifications.'
+
+const onUncaughtException = (error: unknown) => {
+  // This is a known issue with the ResizeObserver API in Chromium 132 which is
+  // fixed in 133 that we can safely ignore.
+  // See: https://issues.chromium.org/issues/391393420
+  if (
+    error === resizeLoopCompletedMessage ||
+    (error &&
+      typeof error === 'object' &&
+      'message' in error &&
+      error.message === resizeLoopCompletedMessage)
+  ) {
+    sendNonFatalException(
+      'resizeObserverLoopCompleted',
+      withSourceMappedStack(error)
+    )
+    return
+  }
+
   sendErrorWithContext(error)
-  reportUncaughtException(error)
-})
+  reportUncaughtException(withSourceMappedStack(error))
+
+  // We used to subscribe to uncaughtException using process.once but we want
+  // to be able to ignore the resize observer error above so we need to
+  // unsubscribe manually once we encounter an error we actually want to crash
+  // the app for.
+  process.off('uncaughtException', onUncaughtException)
+}
+
+process.on('uncaughtException', onUncaughtException)
 
 // See sendNonFatalException for more information
 process.on(
@@ -226,6 +258,9 @@ const statsStore = new StatsStore(
 )
 
 const accountsStore = new AccountsStore(localStorage, TokenStore)
+API.setTokenProvider(accountsStore.resolveToken)
+API.onTokenInvalidated(accountsStore.handleTokenInvalidated)
+installAuthenticatedImageTokenHandler(accountsStore.resolveToken)
 
 const signInStore = new SignInStore(accountsStore)
 
@@ -234,13 +269,13 @@ trampolineServer.registerCommandHandler(
   createAskpassTrampolineHandler(accountsStore)
 )
 
-trampolineServer.registerCommandHandler(
-  TrampolineCommandIdentifier.CredentialHelper,
-  createCredentialHelperTrampolineHandler(accountsStore)
-)
-
 const repositoriesStore = new RepositoriesStore(
   new RepositoriesDatabase('Database')
+)
+
+trampolineServer.registerCommandHandler(
+  TrampolineCommandIdentifier.CredentialHelper,
+  createCredentialHelperTrampolineHandler(accountsStore, repositoriesStore)
 )
 
 const pullRequestStore = new PullRequestStore(
@@ -262,11 +297,14 @@ const aheadBehindStore = new AheadBehindStore()
 
 const aliveStore = new AliveStore(accountsStore)
 
+const copilotStore = new CopilotStore(accountsStore)
+
 const notificationsStore = new NotificationsStore(
   accountsStore,
   aliveStore,
   pullRequestCoordinator,
-  statsStore
+  statsStore,
+  repositoriesStore
 )
 
 const notificationsDebugStore = new NotificationsDebugStore(
@@ -286,7 +324,8 @@ const appStore = new AppStore(
   pullRequestCoordinator,
   repositoryStateManager,
   apiRepositoriesStore,
-  notificationsStore
+  notificationsStore,
+  copilotStore
 )
 
 appStore.onDidUpdate(state => {
@@ -315,6 +354,7 @@ dispatcher.registerErrorHandler(localChangesOverwrittenHandler)
 dispatcher.registerErrorHandler(rebaseConflictsHandler)
 dispatcher.registerErrorHandler(refusedWorkflowUpdate)
 dispatcher.registerErrorHandler(discardChangesHandler)
+dispatcher.registerErrorHandler(secretScanningPushProtectionErrorHandler)
 
 document.body.classList.add(`platform-${process.platform}`)
 
@@ -349,7 +389,15 @@ ipcRenderer.on('blur', () => {
 })
 
 ipcRenderer.on('url-action', (_, action) =>
-  dispatcher.dispatchURLAction(action)
+  dispatcher
+    .dispatchURLAction(action)
+    .catch(e => log.error(`URL action ${action.name} failed`, e))
+)
+
+ipcRenderer.on('cli-action', (_, action) =>
+  dispatcher
+    .dispatchCLIAction(action)
+    .catch(e => log.error(`CLI action ${action.kind} failed`, e))
 )
 
 // react-virtualized will use the literal string "grid" as the 'aria-label'

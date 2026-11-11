@@ -33,6 +33,7 @@ import { doMergeCommitsExistAfterCommit } from '../../lib/git'
 import { KeyboardInsertionData } from '../lib/list'
 import { Account } from '../../models/account'
 import { Emoji } from '../../lib/emoji'
+import { formatNumber } from '../../lib/format-number'
 
 interface ICompareSidebarProps {
   readonly repository: Repository
@@ -58,10 +59,12 @@ interface ICompareSidebarProps {
   readonly tagsToPush: ReadonlyArray<string> | null
   readonly aheadBehindStore: AheadBehindStore
   readonly isMultiCommitOperationInProgress?: boolean
+  /** Whether assisted execution or retained recovery locks this repository. */
+  readonly isAssistedCommitRepositoryLocked: boolean
   readonly shasToHighlight: ReadonlyArray<string>
   readonly accounts: ReadonlyArray<Account>
+  readonly preferAbsoluteDates: boolean
 }
-
 interface ICompareSidebarState {
   /**
    * This branch should only be used when tracking interactions that the user is performing.
@@ -283,8 +286,12 @@ export class CompareSidebar extends React.Component<
         isMultiCommitOperationInProgress={
           this.props.isMultiCommitOperationInProgress
         }
+        isAssistedCommitRepositoryLocked={
+          this.props.isAssistedCommitRepositoryLocked
+        }
         keyboardReorderData={this.state.keyboardReorderData}
         accounts={this.props.accounts}
+        preferAbsoluteDates={this.props.preferAbsoluteDates}
       />
     )
   }
@@ -356,6 +363,7 @@ export class CompareSidebar extends React.Component<
 
     return (
       <BranchList
+        repository={this.props.repository}
         ref={this.onBranchesListRef}
         defaultBranch={defaultBranch}
         currentBranch={this.props.currentBranch}
@@ -417,8 +425,10 @@ export class CompareSidebar extends React.Component<
     return (
       <div className="compare-content">
         <TabBar selectedIndex={selectedTab} onTabClicked={this.onTabClicked}>
-          <span>{`Behind (${formState.aheadBehind.behind})`}</span>
-          <span>{`Ahead (${formState.aheadBehind.ahead})`}</span>
+          <span>{`Behind (${formatNumber(
+            formState.aheadBehind.behind
+          )})`}</span>
+          <span>{`Ahead (${formatNumber(formState.aheadBehind.ahead)})`}</span>
         </TabBar>
         {this.renderActiveTab(formState)}
       </div>
@@ -702,6 +712,7 @@ export class CompareSidebar extends React.Component<
       commitMessage: {
         summary: squashOnto.summary,
         description: squashedDescription,
+        timestamp: Date.now(),
       },
       dialogTitle: `Squash ${allCommitsInSquash.length} Commits`,
       dialogButtonText: `Squash ${allCommitsInSquash.length} Commits`,

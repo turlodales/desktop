@@ -1,13 +1,12 @@
 import * as React from 'react'
 import { Dialog, DialogContent, DialogFooter } from '../dialog'
 import { Dispatcher } from '../dispatcher'
-import { Row } from '../lib/row'
 import { OkCancelButtonGroup } from '../dialog/ok-cancel-button-group'
 import { Account } from '../../models/account'
-import { getDotComAPIEndpoint } from '../../lib/api'
+import { Ref } from '../lib/ref'
 
 interface IInvalidatedTokenProps {
-  readonly dispatcher: Dispatcher
+  readonly dispatcher: Pick<Dispatcher, 'showAccountSignInDialog'>
   readonly account: Account
   readonly onDismissed: () => void
 }
@@ -18,22 +17,22 @@ interface IInvalidatedTokenProps {
  */
 export class InvalidatedToken extends React.Component<IInvalidatedTokenProps> {
   public render() {
-    const accountTypeSuffix = this.isEnterpriseAccount ? ' Enterprise' : ''
+    const { account } = this.props
 
     return (
       <Dialog
         id="invalidated-token"
         type="warning"
-        title="Warning"
+        title={
+          __DARWIN__ ? 'Invalidated Account Token' : 'Invalidated account token'
+        }
         onSubmit={this.onSubmit}
         onDismissed={this.props.onDismissed}
       >
         <DialogContent>
-          <Row>
-            Your account token has been invalidated and you have been signed out
-            from your GitHub{accountTypeSuffix} account. Do you want to sign in
-            again?
-          </Row>
+          Your account token is no longer valid and you have been signed out
+          from your <Ref>{account.login}</Ref> account on{' '}
+          <Ref>{account.friendlyEndpoint}</Ref>. Do you want to sign in again?
         </DialogContent>
         <DialogFooter>
           <OkCancelButtonGroup okButtonText="Yes" cancelButtonText="No" />
@@ -42,19 +41,13 @@ export class InvalidatedToken extends React.Component<IInvalidatedTokenProps> {
     )
   }
 
-  private get isEnterpriseAccount() {
-    return this.props.account.endpoint !== getDotComAPIEndpoint()
-  }
-
   private onSubmit = () => {
-    const { dispatcher, onDismissed } = this.props
+    const { dispatcher, onDismissed, account } = this.props
 
     onDismissed()
 
-    if (this.isEnterpriseAccount) {
-      dispatcher.showEnterpriseSignInDialog(this.props.account.endpoint)
-    } else {
-      dispatcher.showDotComSignInDialog()
-    }
+    // Other accounts may still be signed in to the same endpoint, so sign
+    // back in to this specific account rather than any account.
+    dispatcher.showAccountSignInDialog(account.endpoint, account.login)
   }
 }

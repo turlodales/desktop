@@ -1,11 +1,12 @@
 /* eslint-disable no-sync */
 /// <reference path="./globals.d.ts" />
 
-import * as path from 'path'
 import * as cp from 'child_process'
-import * as os from 'os'
-import packager, { OfficialArch, OsxNotarizeOptions } from 'electron-packager'
 import frontMatter from 'front-matter'
+import * as os from 'os'
+import * as path from 'path'
+import { getPrintenvzPath } from 'printenvz'
+import { getProxyCommandPath } from 'process-proxy'
 import { externals } from '../app/webpack.common'
 
 interface IChooseALicense {
@@ -22,25 +23,37 @@ export interface ILicense {
   readonly hidden: boolean
 }
 
+type DesktopPackageArch = 'arm64' | 'x64'
+type DesktopPackagePlatform = 'darwin' | 'linux' | 'win32'
+
+interface IDesktopPackagerModule {
+  readonly packager: (options: object) => Promise<ReadonlyArray<string>>
+}
+
+interface IOSXNotarizeOptions {
+  readonly appleApiKey: string
+  readonly appleApiKeyId: string
+  readonly appleApiIssuer: string
+}
+
 import {
   getBundleID,
   getCompanyName,
   getProductName,
 } from '../app/package-info'
 
+import { isGitHubActions } from './build-platforms'
 import {
   getChannel,
+  getDistArchitecture,
   getDistRoot,
   getExecutableName,
+  getIconDirectory,
   isPublishable,
-  getIconFileName,
-  getDistArchitecture,
 } from './dist-info'
-import { isGitHubActions } from './build-platforms'
 
-import { updateLicenseDump } from './licenses/update-license-dump'
-import { verifyInjectedSassVariables } from './validate-sass/validate-all'
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -49,10 +62,16 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'fs'
-import { copySync } from 'fs-extra'
+import { updateLicenseDump } from './licenses/update-license-dump'
+import { verifyInjectedSassVariables } from './validate-sass/validate-all'
+import { join } from 'path'
+import assert from 'assert'
+import { copyCopilotDependency } from './copilot'
+import { getNpmCommand } from './npm'
 
 const isPublishableBuild = isPublishable()
 const isDevelopmentBuild = getChannel() === 'development'
+const shouldSkipPackaging = process.env.DESKTOP_SKIP_PACKAGE === '1'
 
 const projectRoot = path.join(__dirname, '..')
 const entitlementsSuffix = isDevelopmentBuild ? '-dev' : ''
@@ -108,6 +127,11 @@ verifyInjectedSassVariables(outRoot)
     })
   })
   .then(() => {
+    if (shouldSkipPackaging) {
+      console.log('Skipping packaging…')
+      return [outRoot]
+    }
+
     console.log('Packaging…')
     return packageApp()
   })
@@ -119,10 +143,15 @@ verifyInjectedSassVariables(outRoot)
     console.log(`Built to ${appPaths}`)
   })
 
-function packageApp() {
+async function packageApp() {
+  const packagerModuleName = '@electron/packager'
+  const { packager }: IDesktopPackagerModule = await import(packagerModuleName)
+
   // not sure if this is needed anywhere, so I'm just going to inline it here
   // for now and see what the future brings...
-  const toPackagePlatform = (platform: NodeJS.Platform) => {
+  const toPackagePlatform = (
+    platform: NodeJS.Platform
+  ): DesktopPackagePlatform => {
     if (platform === 'win32' || platform === 'darwin' || platform === 'linux') {
       return platform
     }
@@ -131,7 +160,9 @@ function packageApp() {
     )
   }
 
-  const toPackageArch = (targetArch: string | undefined): OfficialArch => {
+  const toPackageArch = (
+    targetArch: string | undefined
+  ): DesktopPackageArch => {
     if (targetArch === undefined) {
       targetArch = os.arch()
     }
@@ -156,9 +187,16 @@ function packageApp() {
   ) {
     // we can't publish a mac build without these
     throw new Error(
-      'Unable to retreive appleId and/or appleIdPassword to notarize macOS build'
+      'Unable to retrieve appleApiKey, appleApiKeyId, and/or appleApiIssuer to notarize macOS build'
     )
   }
+
+  const iconPath = getIconDirectory()
+  const assetsCarPath = join(iconPath, 'Assets.car')
+  assert(
+    existsSync(assetsCarPath),
+    `Unable to find Assets.car at ${assetsCarPath}`
+  )
 
   return packager({
     name: getExecutableName(),
@@ -166,15 +204,21 @@ function packageApp() {
     arch: toPackageArch(process.env.TARGET_ARCH),
     asar: false, // TODO: Probably wanna enable this down the road.
     out: getDistRoot(),
-    icon: path.join(projectRoot, 'app', 'static', 'logos', getIconFileName()),
+    // Packager probes for a sibling .icon file and requires macOS 26 to compile
+    // it. Use a distinct basename so older build hosts use the prebuilt ICNS.
+    icon: join(
+      iconPath,
+      process.platform === 'darwin' ? 'icon-logo-legacy.icns' : 'icon-logo'
+    ),
+    extraResource: [assetsCarPath],
     dir: outRoot,
     overwrite: true,
     tmpdir: false,
-    derefSymlinks: false,
+    derefSymlinks: true,
     prune: false, // We'll prune them ourselves below.
     ignore: [
       new RegExp('/node_modules/electron($|/)'),
-      new RegExp('/node_modules/electron-packager($|/)'),
+      new RegExp('/node_modules/@electron/packager($|/)'),
       new RegExp('/\\.git($|/)'),
       new RegExp('/node_modules/\\.bin($|/)'),
     ],
@@ -225,7 +269,7 @@ function packageApp() {
 
 function removeAndCopy(source: string, destination: string) {
   rmSync(destination, { recursive: true, force: true })
-  copySync(source, destination)
+  cpSync(source, destination, { recursive: true, verbatimSymlinks: true })
 }
 
 function copyEmoji() {
@@ -249,9 +293,16 @@ function copyStaticResources() {
   const destination = path.join(outRoot, 'static')
   rmSync(destination, { recursive: true, force: true })
   if (existsSync(platformSpecific)) {
-    copySync(platformSpecific, destination)
+    cpSync(platformSpecific, destination, {
+      recursive: true,
+      verbatimSymlinks: true,
+    })
   }
-  copySync(common, destination, { overwrite: false })
+  cpSync(common, destination, {
+    recursive: true,
+    force: false,
+    verbatimSymlinks: true,
+  })
 }
 
 function moveAnalysisFiles() {
@@ -265,7 +316,11 @@ function moveAnalysisFiles() {
     //
     // unlinkSync below ensures that the analysis file isn't bundled into
     // the app by accident
-    copySync(analysisSource, destination, { overwrite: true })
+    cpSync(analysisSource, destination, {
+      recursive: true,
+      force: true,
+      verbatimSymlinks: true,
+    })
     unlinkSync(analysisSource)
   }
 }
@@ -293,8 +348,20 @@ function copyDependencies() {
     force: true,
   })
 
-  console.log('  Installing dependencies via yarn…')
-  cp.execSync('yarn install', { cwd: outRoot, env: process.env })
+  console.log('  Installing dependencies via npm…')
+  const npm = getNpmCommand([
+    'install',
+    '--package-lock=false',
+    '--install-links',
+    '--legacy-peer-deps',
+    '--cpu',
+    getDistArchitecture(),
+  ])
+  cp.execFileSync(npm.executable, npm.args, {
+    cwd: outRoot,
+    env: process.env,
+    stdio: 'inherit',
+  })
 
   console.log('  Copying desktop-askpass-trampoline…')
   const trampolineSource = path.resolve(
@@ -309,22 +376,32 @@ function copyDependencies() {
 
   rmSync(desktopTrampolineDir, { recursive: true, force: true })
   mkdirSync(desktopTrampolineDir, { recursive: true })
-  copySync(
+  cpSync(
     path.resolve(trampolineSource, desktopAskpassTrampolineFile),
-    path.resolve(desktopTrampolineDir, desktopAskpassTrampolineFile)
+    path.resolve(desktopTrampolineDir, desktopAskpassTrampolineFile),
+    { recursive: true, verbatimSymlinks: true }
+  )
+
+  console.log('  Copying copilot…')
+  copyCopilotDependency(
+    path.join(projectRoot, 'app', 'node_modules'),
+    path.join(outRoot, 'copilot'),
+    process.platform,
+    getDistArchitecture()
   )
 
   // Dev builds for macOS require a SSH wrapper to use SSH_ASKPASS
   if (process.platform === 'darwin' && isDevelopmentBuild) {
     console.log('  Copying ssh-wrapper')
     const sshWrapperFile = 'ssh-wrapper'
-    copySync(
+    cpSync(
       path.resolve(
         projectRoot,
         'app/node_modules/desktop-trampoline/build/Release',
         sshWrapperFile
       ),
-      path.resolve(desktopTrampolineDir, sshWrapperFile)
+      path.resolve(desktopTrampolineDir, sshWrapperFile),
+      { recursive: true, verbatimSymlinks: true }
     )
   }
 
@@ -332,10 +409,13 @@ function copyDependencies() {
   const gitDir = path.resolve(outRoot, 'git')
   rmSync(gitDir, { recursive: true, force: true })
   mkdirSync(gitDir, { recursive: true })
-  copySync(path.resolve(projectRoot, 'app/node_modules/dugite/git'), gitDir)
+  cpSync(path.resolve(projectRoot, 'app/node_modules/dugite/git'), gitDir, {
+    recursive: true,
+    verbatimSymlinks: true,
+  })
 
   console.log('  Copying desktop credential helper…')
-  const mingw = getDistArchitecture() === 'x64' ? 'mingw64' : 'mingw32'
+  const mingw = getDistArchitecture() === 'x64' ? 'ucrt64' : 'clangarm64'
   const gitCoreDir =
     process.platform === 'win32'
       ? path.resolve(outRoot, 'git', mingw, 'libexec', 'git-core')
@@ -350,20 +430,42 @@ function copyDependencies() {
     process.platform === 'win32' ? '.exe' : ''
   }`
 
-  copySync(
+  cpSync(
     path.resolve(trampolineSource, desktopCredentialHelperTrampolineFile),
-    path.resolve(gitCoreDir, desktopCredentialHelperFile)
+    path.resolve(gitCoreDir, desktopCredentialHelperFile),
+    { recursive: true, verbatimSymlinks: true }
   )
 
   if (process.platform === 'darwin') {
     console.log('  Copying app-path binary…')
     const appPathMain = path.resolve(outRoot, 'main')
     rmSync(appPathMain, { recursive: true, force: true })
-    copySync(
+    cpSync(
       path.resolve(projectRoot, 'app/node_modules/app-path/main'),
-      appPathMain
+      appPathMain,
+      { recursive: true, verbatimSymlinks: true }
     )
   }
+
+  console.log('  Copying process-proxy binary')
+  cpSync(
+    getProxyCommandPath(),
+    path.resolve(
+      outRoot,
+      process.platform === 'win32' ? 'process-proxy.exe' : 'process-proxy'
+    ),
+    { recursive: true, verbatimSymlinks: true }
+  )
+
+  console.log('  Copying printenvz binary')
+  cpSync(
+    getPrintenvzPath(),
+    path.resolve(
+      outRoot,
+      process.platform === 'win32' ? 'printenvz.exe' : 'printenvz'
+    ),
+    { recursive: true, verbatimSymlinks: true }
+  )
 }
 
 function generateLicenseMetadata(outRoot: string) {
@@ -423,14 +525,14 @@ ${licenseText}`
   rmSync(chooseALicense, { recursive: true, force: true })
 }
 
-function getNotarizationOptions(): OsxNotarizeOptions | undefined {
+function getNotarizationOptions(): IOSXNotarizeOptions | undefined {
   const {
-    APPLE_ID: appleId,
-    APPLE_ID_PASSWORD: appleIdPassword,
-    APPLE_TEAM_ID: teamId,
+    APPLE_API_KEY_PATH: appleApiKey,
+    APPLE_API_KEY_ID: appleApiKeyId,
+    APPLE_API_ISSUER: appleApiIssuer,
   } = process.env
 
-  return appleId && appleIdPassword && teamId
-    ? { tool: 'notarytool', appleId, appleIdPassword, teamId }
+  return appleApiKey && appleApiKeyId && appleApiIssuer
+    ? { appleApiKey, appleApiKeyId, appleApiIssuer }
     : undefined
 }

@@ -9,12 +9,8 @@ import { DragData, DragType } from '../../models/drag-drop'
 import classNames from 'classnames'
 import memoizeOne from 'memoize-one'
 import { IMenuItem, showContextualMenu } from '../../lib/menu-item'
-import {
-  enableCheckoutCommit,
-  enableResetToCommit,
-} from '../../lib/feature-flag'
 import { getDotComAPIEndpoint } from '../../lib/api'
-import { clipboard } from 'electron'
+import { writeClipboardText } from '../main-process-proxy'
 import { RowIndexPath } from '../lib/list/list-row-index-path'
 import { assertNever } from '../../lib/fatal-error'
 import { CommitDragElement } from '../drag-elements/commit-drag-element'
@@ -28,6 +24,11 @@ import {
 import { KeyboardShortcut } from '../keyboard-shortcut/keyboard-shortcut'
 import { Account } from '../../models/account'
 import { Emoji } from '../../lib/emoji'
+import { getAvatarUsersForCommit, IAvatarUser } from '../../models/avatar'
+import { formatDate } from '../../lib/format-date'
+import { Avatar } from '../lib/avatar'
+import { Octicon } from '../octicons'
+import * as octicons from '../octicons/octicons.generated'
 
 const RowHeight = 50
 
@@ -159,6 +160,9 @@ interface ICommitListProps {
    * conflicts resolution step allows interaction with history) */
   readonly isMultiCommitOperationInProgress?: boolean
 
+  /** Whether assisted execution or retained recovery locks this repository. */
+  readonly isAssistedCommitRepositoryLocked?: boolean
+
   /** Callback to render commit drag element */
   readonly onRenderCommitDragElement?: (
     commit: Commit,
@@ -178,6 +182,8 @@ interface ICommitListProps {
   readonly shasToHighlight?: ReadonlyArray<string>
 
   readonly accounts: ReadonlyArray<Account>
+
+  readonly preferAbsoluteDates: boolean
 
   /** This will make the list semantics friendly to screen reader users in browse mode. */
   readonly isInformationalView?: boolean
@@ -299,6 +305,7 @@ export class CommitList extends React.Component<
         emoji={this.props.emoji}
         isDraggable={
           this.props.isMultiCommitOperationInProgress === false &&
+          this.props.isAssistedCommitRepositoryLocked !== true &&
           !this.inKeyboardReorderMode
         }
         onSquash={this.onSquash}
@@ -307,6 +314,7 @@ export class CommitList extends React.Component<
         onRemoveDragElement={this.props.onRemoveCommitDragElement}
         disableSquashing={this.props.disableSquashing}
         accounts={this.props.accounts}
+        preferAbsoluteDates={this.props.preferAbsoluteDates}
       />
     )
   }
@@ -464,6 +472,89 @@ export class CommitList extends React.Component<
     return rowClassMap
   }
 
+  private renderExpandedAuthor(user: IAvatarUser): string | JSX.Element {
+    if (!user) {
+      return 'Unknown user'
+    }
+
+    if (user.name) {
+      return (
+        <>
+          <div>{user.name}</div>
+          <div>{user.email}</div>
+        </>
+      )
+    }
+
+    return user.email
+  }
+
+  private renderRowFocusTooltip = (indexPath: RowIndexPath | undefined) => {
+    if (!indexPath) {
+      return null
+    }
+    const row = indexPath.row
+    const sha = this.props.commitSHAs[row]
+    const commit = this.props.commitLookup.get(sha)
+    if (!commit) {
+      return null
+    }
+
+    const avatarUsers = getAvatarUsersForCommit(
+      this.props.gitHubRepository,
+      commit
+    )
+
+    const {
+      author: { date },
+    } = commit
+
+    const absoluteDate = formatDate(date, {
+      dateStyle: 'full',
+      timeStyle: 'short',
+    })
+
+    const authorList = avatarUsers.map((user, i) => {
+      return (
+        <div className="author" key={i}>
+          <div className="label">
+            <Avatar accounts={this.props.accounts} user={user} title={null} />
+          </div>
+          <div>{this.renderExpandedAuthor(user)}</div>
+        </div>
+      )
+    })
+
+    const isLocal = this.isLocalCommit(commit.sha)
+    const unpushedTags = this.getUnpushedTags(commit)
+
+    const showUnpushedIndicator =
+      (isLocal || unpushedTags.length > 0) &&
+      this.props.isLocalRepository === false
+
+    return (
+      <div className="commit-list-item-tooltip list-item-tooltip">
+        {authorList}
+        <div>
+          <div className="label">Date: </div>
+          {absoluteDate}
+        </div>
+        {showUnpushedIndicator ? (
+          <div>
+            <div className="label">
+              <span className="unpushed-indicator">
+                <Octicon symbol={octicons.arrowUp} />
+              </span>
+            </div>
+            <div>
+              {this.getUnpushedIndicatorTitle(isLocal, unpushedTags.length)}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
   public focus() {
     this.listRef.current?.focus()
   }
@@ -476,6 +567,7 @@ export class CommitList extends React.Component<
       emptyListMessage,
       reorderingEnabled,
       isMultiCommitOperationInProgress,
+      isAssistedCommitRepositoryLocked,
     } = this.props
     if (commitSHAs.length === 0) {
       return (
@@ -499,7 +591,7 @@ export class CommitList extends React.Component<
         {this.renderReorderCommitsHint()}
         <List
           ariaLabel="Commits"
-          role={this.props.isInformationalView === true ? 'list' : 'list-box'}
+          role={this.props.isInformationalView === true ? 'list' : 'listbox'}
           ref={this.listRef}
           rowCount={commitSHAs.length}
           rowHeight={RowHeight}
@@ -520,7 +612,8 @@ export class CommitList extends React.Component<
           keyboardInsertionElementRenderer={this.renderKeyboardInsertionElement}
           insertionDragType={
             reorderingEnabled === true &&
-            isMultiCommitOperationInProgress === false
+            isMultiCommitOperationInProgress === false &&
+            isAssistedCommitRepositoryLocked !== true
               ? DragType.Commit
               : undefined
           }
@@ -530,9 +623,12 @@ export class CommitList extends React.Component<
             commitLookupHash: this.commitsHash(this.getVisibleCommits()),
             tagsToPush: this.props.tagsToPush,
             shasToHighlight: this.props.shasToHighlight,
+            preferAbsoluteDates: this.props.preferAbsoluteDates,
+            isAssistedCommitRepositoryLocked,
           }}
           setScrollTop={this.props.compareListScrollTop}
           rowCustomClassNameMap={this.getRowCustomClassMap()}
+          renderRowFocusTooltip={this.renderRowFocusTooltip}
         />
         <AriaLiveContainer message={this.state.reorderingMessage} />
       </div>
@@ -681,27 +777,23 @@ export class CommitList extends React.Component<
       })
     }
 
-    if (enableResetToCommit()) {
-      items.push({
-        label: __DARWIN__ ? 'Reset to Commit…' : 'Reset to commit…',
-        action: () => {
-          if (this.props.onResetToCommit) {
-            this.props.onResetToCommit(commit)
-          }
-        },
-        enabled: canBeResetTo && this.props.onResetToCommit !== undefined,
-      })
-    }
+    items.push({
+      label: __DARWIN__ ? 'Reset to Commit…' : 'Reset to commit…',
+      action: () => {
+        if (this.props.onResetToCommit) {
+          this.props.onResetToCommit(commit)
+        }
+      },
+      enabled: canBeResetTo && this.props.onResetToCommit !== undefined,
+    })
 
-    if (enableCheckoutCommit()) {
-      items.push({
-        label: __DARWIN__ ? 'Checkout Commit' : 'Checkout commit',
-        action: () => {
-          this.props.onCheckoutCommit?.(commit)
-        },
-        enabled: canBeCheckedOut && this.props.onCheckoutCommit !== undefined,
-      })
-    }
+    items.push({
+      label: __DARWIN__ ? 'Checkout Commit' : 'Checkout commit',
+      action: () => {
+        this.props.onCheckoutCommit?.(commit)
+      },
+      enabled: canBeCheckedOut && this.props.onCheckoutCommit !== undefined,
+    })
 
     items.push({
       label: __DARWIN__ ? 'Reorder Commit' : 'Reorder commit',
@@ -762,11 +854,11 @@ export class CommitList extends React.Component<
       { type: 'separator' },
       {
         label: 'Copy SHA',
-        action: () => clipboard.writeText(commit.sha),
+        action: () => writeClipboardText(commit.sha),
       },
       {
         label: __DARWIN__ ? darwinTagsLabel : windowTagsLabel,
-        action: () => clipboard.writeText(commit.tags.join(' ')),
+        action: () => writeClipboardText(commit.tags.join(' ')),
         enabled: commit.tags.length > 0,
       },
       {
@@ -782,14 +874,17 @@ export class CommitList extends React.Component<
   private canCherryPick(): boolean {
     const { onCherryPick, isMultiCommitOperationInProgress } = this.props
     return (
-      onCherryPick !== undefined && isMultiCommitOperationInProgress === false
+      onCherryPick !== undefined &&
+      isMultiCommitOperationInProgress === false &&
+      this.props.isAssistedCommitRepositoryLocked !== true
     )
   }
 
   private canReorder = () =>
     this.props.onKeyboardReorder !== undefined &&
     this.props.disableReordering === false &&
-    this.props.isMultiCommitOperationInProgress === false
+    this.props.isMultiCommitOperationInProgress === false &&
+    this.props.isAssistedCommitRepositoryLocked !== true
 
   private canSquash(): boolean {
     const { onSquash, disableSquashing, isMultiCommitOperationInProgress } =
@@ -797,7 +892,8 @@ export class CommitList extends React.Component<
     return (
       onSquash !== undefined &&
       disableSquashing === false &&
-      isMultiCommitOperationInProgress === false
+      isMultiCommitOperationInProgress === false &&
+      this.props.isAssistedCommitRepositoryLocked !== true
     )
   }
 

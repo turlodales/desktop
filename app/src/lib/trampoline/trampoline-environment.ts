@@ -1,16 +1,19 @@
 import { trampolineServer } from './trampoline-server'
-import { withTrampolineToken } from './trampoline-tokens'
+import {
+  isValidTrampolineToken,
+  withTrampolineToken,
+} from './trampoline-tokens'
 import * as Path from 'path'
 import { getSSHEnvironment } from '../ssh/ssh'
 import {
   deleteMostRecentSSHCredential,
   removeMostRecentSSHCredential,
 } from '../ssh/ssh-credential-storage'
-import { GitError as DugiteError, GitProcess } from 'dugite'
+import { GitError as DugiteError, exec } from 'dugite'
 import memoizeOne from 'memoize-one'
-import { enableGitConfigParameters } from '../feature-flag'
 import { GitError, getDescriptionForError } from '../git/core'
 import { getDesktopAskpassTrampolineFilename } from 'desktop-trampoline'
+import { IAccountIdentity } from '../../models/account'
 
 const hasRejectedCredentialsForEndpoint = new Map<string, Set<string>>()
 
@@ -35,8 +38,38 @@ export const getHasRejectedCredentialsForEndpoint = (
     false
   )
 }
+const credentialLeases = new Map<string, Array<() => void>>()
+
+/**
+ * Hold a credential lease until the Git process using this trampoline token
+ * exits. Releases it right away if that process has already finished.
+ */
+export const holdCredentialLease = (
+  trampolineToken: string,
+  release: () => void
+) => {
+  if (!isValidTrampolineToken(trampolineToken)) {
+    release()
+    return
+  }
+  const leases = credentialLeases.get(trampolineToken)
+  if (leases) {
+    leases.push(release)
+  } else {
+    credentialLeases.set(trampolineToken, [release])
+  }
+}
+
 const isBackgroundTaskEnvironment = new Map<string, boolean>()
 const trampolineEnvironmentPath = new Map<string, string>()
+const trampolineFallbackAccount = new Map<string, IAccountIdentity>()
+
+/**
+ * The account to use when no account can be resolved from the repository at
+ * the operation's path. See `IGitExecutionOptions.fallbackAccount`.
+ */
+export const getTrampolineFallbackAccount = (token: string) =>
+  trampolineFallbackAccount.get(token)
 
 export const getTrampolineEnvironmentPath = (trampolineToken: string) =>
   trampolineEnvironmentPath.get(trampolineToken) ?? process.cwd()
@@ -61,7 +94,7 @@ export const getCredentialUrl = (cred: Map<string, string>) => {
 
 export const GitUserAgent = memoizeOne(() =>
   // Can't use git() as that will call withTrampolineEnv which calls this method
-  GitProcess.exec(['--version'], process.cwd())
+  exec(['--version'], process.cwd())
     // https://github.com/git/git/blob/a9e066fa63149291a55f383cfa113d8bdbdaa6b3/help.c#L733-L739
     .then(r => /git version (.*)/.exec(r.stdout)?.at(1) ?? 'unknown')
     .catch(e => {
@@ -90,18 +123,29 @@ const fatalPromptsDisabledRe =
  *
  * @param fn        Function to invoke with all the necessary environment
  *                  variables.
+ *
+ * @param fallbackAccount The account to use when no account can be resolved
+ *                        from the repository at `path`. Only intended for
+ *                        edge cases, see `IGitExecutionOptions.fallbackAccount`.
  */
 export async function withTrampolineEnv<T>(
   fn: (env: object) => Promise<T>,
   path: string,
   isBackgroundTask = false,
-  customEnv?: Record<string, string | undefined>
+  customEnv?: Record<string, string | undefined>,
+  fallbackAccount?: IAccountIdentity
 ): Promise<T> {
   const sshEnv = await getSSHEnvironment()
 
   return withTrampolineToken(async token => {
     isBackgroundTaskEnvironment.set(token, isBackgroundTask)
     trampolineEnvironmentPath.set(token, path)
+    if (fallbackAccount !== undefined) {
+      // Copy the identity so that an Account (and its token) passed in by
+      // mistake isn't retained for the duration of the operation.
+      const { endpoint, login } = fallbackAccount
+      trampolineFallbackAccount.set(token, { endpoint, login })
+    }
 
     const existingGitEnvConfig =
       customEnv?.['GIT_CONFIG_PARAMETERS'] ??
@@ -113,8 +157,7 @@ export async function withTrampolineEnv<T>(
 
     // The code below assumes a few things in order to manage SSH key passphrases
     // correctly:
-    // 1. `withTrampolineEnv` is only used in the functions `git` (core.ts) and
-    //    `spawnAndComplete` (spawn.ts)
+    // 1. `withTrampolineEnv` is only used in the functions `git` (core.ts)
     // 2. Those two functions always thrown an error when something went wrong,
     //    and just return a result when everything went fine.
     //
@@ -142,17 +185,8 @@ export async function withTrampolineEnv<T>(
         //
         // See https://github.com/desktop/desktop/issues/18945
         // See https://github.com/git/git/blob/ed155187b429a/config.c#L664
-        ...(enableGitConfigParameters()
-          ? {
-              GIT_CONFIG_PARAMETERS: `${gitEnvConfigPrefix}'credential.helper=' 'credential.helper=desktop'`,
-            }
-          : {
-              GIT_CONFIG_COUNT: '2',
-              GIT_CONFIG_KEY_0: 'credential.helper',
-              GIT_CONFIG_VALUE_0: '',
-              GIT_CONFIG_KEY_1: 'credential.helper',
-              GIT_CONFIG_VALUE_1: 'desktop',
-            }),
+        GIT_CONFIG_PARAMETERS: `${gitEnvConfigPrefix}'credential.helper=' 'credential.helper=desktop'`,
+
         GIT_USER_AGENT: await GitUserAgent(),
         ...sshEnv,
       })
@@ -187,13 +221,15 @@ export async function withTrampolineEnv<T>(
         e instanceof GitError &&
         fatalPromptsDisabledRe.test(e.message)
       ) {
+        const msg = 'Authentication failed: user cancelled authentication'
         const gitErrorDescription =
           getDescriptionForError(DugiteError.HTTPSAuthenticationFailed, '') ??
-          'Authentication failed: user cancelled authentication'
+          msg
 
         const fakeAuthError = new GitError(
           { ...e.result, gitErrorDescription },
-          e.args
+          e.args,
+          msg
         )
 
         fakeAuthError.cause = e
@@ -203,9 +239,12 @@ export async function withTrampolineEnv<T>(
       throw e
     } finally {
       removeMostRecentSSHCredential(token)
+      credentialLeases.get(token)?.forEach(release => release())
+      credentialLeases.delete(token)
       isBackgroundTaskEnvironment.delete(token)
       hasRejectedCredentialsForEndpoint.delete(token)
       trampolineEnvironmentPath.delete(token)
+      trampolineFallbackAccount.delete(token)
     }
   })
 }

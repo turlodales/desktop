@@ -54,7 +54,7 @@ interface ICommitMessageAvatarProps {
 
   /**
    * List of validations that failed for repo rules. Only used if
-   * {@link warningType} is 'disallowedEmail'.
+   * `warningType` is 'disallowedEmail'.
    */
   readonly emailRuleFailures?: RepoRulesMetadataFailures
 
@@ -76,6 +76,9 @@ interface ICommitMessageAvatarProps {
    * The currently selected repository
    */
   readonly repository: Repository
+
+  /** Whether the manual author controls are active. Defaults to true. */
+  readonly isActive?: boolean
 
   readonly onUpdateEmail: (email: string) => void
 
@@ -104,6 +107,7 @@ export class CommitMessageAvatar extends React.Component<
 > {
   private avatarButtonRef: HTMLButtonElement | null = null
   private warningBadgeRef = React.createRef<HTMLDivElement>()
+  private gitConfigLocationRequestID = 0
 
   public constructor(props: ICommitMessageAvatarProps) {
     super(props)
@@ -113,26 +117,61 @@ export class CommitMessageAvatar extends React.Component<
       accountEmail: this.props.preferredAccountEmail,
       isGitConfigLocal: false,
     }
-    this.determineGitConfigLocation()
-  }
-
-  public componentDidUpdate(prevProps: ICommitMessageAvatarProps) {
-    if (
-      this.props.user?.name !== prevProps.user?.name ||
-      this.props.user?.email !== prevProps.user?.email
-    ) {
+    if (props.isActive !== false) {
       this.determineGitConfigLocation()
     }
   }
 
-  private async determineGitConfigLocation() {
-    const isGitConfigLocal = await this.isGitConfigLocal()
-    this.setState({ isGitConfigLocal })
+  public componentDidUpdate(prevProps: ICommitMessageAvatarProps) {
+    if (this.props.isActive === false && prevProps.isActive !== false) {
+      this.gitConfigLocationRequestID++
+    }
+    if (this.props.isActive === false && this.state.isPopoverOpen) {
+      this.closePopover()
+    }
+
+    if (
+      this.props.isActive !== false &&
+      (prevProps.isActive === false ||
+        this.props.user?.name !== prevProps.user?.name ||
+        this.props.user?.email !== prevProps.user?.email ||
+        this.props.repository.path !== prevProps.repository.path)
+    ) {
+      this.determineGitConfigLocation()
+    }
+
+    if (
+      this.props.preferredAccountEmail !== prevProps.preferredAccountEmail &&
+      this.state.accountEmail === prevProps.preferredAccountEmail
+    ) {
+      this.setState({ accountEmail: this.props.preferredAccountEmail })
+    }
   }
 
-  private isGitConfigLocal = async () => {
+  public componentWillUnmount() {
+    this.gitConfigLocationRequestID++
+  }
+
+  private async determineGitConfigLocation() {
+    const requestID = ++this.gitConfigLocationRequestID
+    const isGitConfigLocal = await this.isGitConfigLocal(requestID)
+    if (
+      this.avatarButtonRef !== null &&
+      requestID === this.gitConfigLocationRequestID
+    ) {
+      this.setState({ isGitConfigLocal })
+    }
+  }
+
+  private isGitConfigLocal = async (requestID: number) => {
     const { repository } = this.props
     const localName = await getConfigValue(repository, 'user.name', true)
+    if (
+      requestID !== this.gitConfigLocationRequestID ||
+      this.props.isActive === false
+    ) {
+      return false
+    }
     const localEmail = await getConfigValue(repository, 'user.email', true)
     return localName !== null || localEmail !== null
   }
@@ -174,7 +213,9 @@ export class CommitMessageAvatar extends React.Component<
           {warningType !== 'none' && this.renderWarningBadge()}
           <Avatar accounts={this.props.accounts} user={user} title={null} />
         </Button>
-        {this.state.isPopoverOpen && this.renderPopover()}
+        {this.props.isActive !== false &&
+          this.state.isPopoverOpen &&
+          this.renderPopover()}
       </div>
     )
   }
@@ -219,6 +260,9 @@ export class CommitMessageAvatar extends React.Component<
 
   private onAvatarClick = (event: React.FormEvent<HTMLButtonElement>) => {
     event.preventDefault()
+    if (this.props.isActive === false) {
+      return
+    }
     if (this.state.isPopoverOpen) {
       this.closePopover()
     } else {
@@ -279,24 +323,29 @@ export class CommitMessageAvatar extends React.Component<
       </>
     )
 
+    const hasEmails = this.props.accountEmails.length > 0
+
     const sharedFooter = (
       <>
-        <Row>
-          <Select
-            label="Your Account Emails"
-            value={this.state.accountEmail}
-            onChange={this.onSelectedGitHubEmailChange}
-          >
-            {this.props.accountEmails.map(n => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </Select>
-        </Row>
+        {hasEmails && (
+          <Row>
+            <Select
+              label="Your Account Emails"
+              value={this.state.accountEmail}
+              onChange={this.onSelectedGitHubEmailChange}
+            >
+              {this.props.accountEmails.map(n => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </Select>
+          </Row>
+        )}
         <Row>
           <div className="secondary-text">
-            You can also choose an email local to this repository from the{' '}
+            You can{hasEmails ? ' also' : ''} choose an email local to this
+            repository from the{' '}
             <LinkButton onClick={this.onRepositorySettingsClick}>
               repository settings
             </LinkButton>
@@ -307,9 +356,11 @@ export class CommitMessageAvatar extends React.Component<
           <Button onClick={this.onIgnoreClick} type="button">
             Ignore
           </Button>
-          <Button onClick={this.onUpdateEmailClick} type="submit">
-            {updateEmailTitle}
-          </Button>
+          {hasEmails && (
+            <Button onClick={this.onUpdateEmailClick} type="submit">
+              {updateEmailTitle}
+            </Button>
+          )}
         </Row>
       </>
     )
@@ -410,6 +461,7 @@ export class CommitMessageAvatar extends React.Component<
         }
         anchorPosition={PopoverAnchorPosition.RightBottom}
         decoration={PopoverDecoration.Balloon}
+        onMousedownOutside={this.closePopover}
         onClickOutside={this.closePopover}
         ariaLabelledby="commit-avatar-popover-header"
       >

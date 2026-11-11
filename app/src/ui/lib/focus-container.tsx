@@ -38,6 +38,13 @@ export class FocusContainer extends React.Component<
     this.state = { focusWithin: false }
   }
 
+  public componentWillUnmount() {
+    if (this.focusWithinChangedTimeoutId !== null) {
+      cancelAnimationFrame(this.focusWithinChangedTimeoutId)
+      this.focusWithinChangedTimeoutId = null
+    }
+  }
+
   /**
    * Update the focus state of the container, aborting any in-flight animation
    *
@@ -101,6 +108,10 @@ export class FocusContainer extends React.Component<
     })
 
     return (
+      /**
+       * This a11y linter is a false-positive as the element is facilitating our
+       * ability to track and react to focus changes within a container.
+       */
       // eslint-disable-next-line jsx-a11y/no-static-element-interactions
       <div
         className={className}

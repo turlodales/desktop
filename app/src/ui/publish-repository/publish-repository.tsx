@@ -11,10 +11,19 @@ import { sanitizedRepositoryName } from '../add-repository/sanitized-repository-
 import { Octicon } from '../octicons'
 import * as octicons from '../octicons/octicons.generated'
 import { RepositoryPublicationSettings } from '../../models/publish-settings'
+import { AccountPicker } from '../account-picker'
 
 interface IPublishRepositoryProps {
-  /** The user to use for publishing. */
-  readonly account: Account
+  /**
+   * The account to publish with, or null when the user still has to choose
+   * one.
+   */
+  readonly account: Account | null
+
+  /** The available accounts that the user is able to use when publishing */
+  readonly accounts: ReadonlyArray<Account>
+
+  readonly onSelectedAccountChanged: (account: Account) => void
 
   /** The settings to use when publishing the repository. */
   readonly settings: RepositoryPublicationSettings
@@ -49,14 +58,22 @@ export class PublishRepository extends React.Component<
   public componentWillReceiveProps(nextProps: IPublishRepositoryProps) {
     if (this.props.account !== nextProps.account) {
       this.setState({ orgs: [] })
-
       this.fetchOrgs(nextProps.account)
     }
   }
 
-  private async fetchOrgs(account: Account) {
+  private async fetchOrgs(account: Account | null) {
+    if (account === null) {
+      return
+    }
     const api = API.fromAccount(account)
     const apiOrgs = await api.fetchOrgs()
+
+    // Ignore organizations for an account that's no longer selected.
+    if (this.props.account !== account) {
+      return
+    }
+
     const orgs = [...apiOrgs]
     orgs.sort((a, b) => caseInsensitiveCompare(a.login, b.login))
     this.setState({ orgs })
@@ -142,6 +159,16 @@ export class PublishRepository extends React.Component<
   public render() {
     return (
       <DialogContent>
+        <Row>
+          <AccountPicker
+            accounts={this.props.accounts}
+            openButtonClassName="dialog-preferred-focus"
+            selectedAccount={this.props.account}
+            onSelectedAccountChanged={this.props.onSelectedAccountChanged}
+            groupByHost={true}
+          />
+        </Row>
+
         <Row>
           <TextBox
             label="Name"

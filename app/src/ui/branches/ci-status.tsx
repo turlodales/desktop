@@ -3,12 +3,13 @@ import { Octicon, OcticonSymbol } from '../octicons'
 import * as octicons from '../octicons/octicons.generated'
 import classNames from 'classnames'
 import { GitHubRepository } from '../../models/github-repository'
-import { DisposableLike } from 'event-kit'
+import { Repository } from '../../models/repository'
+import type { Disposable } from 'event-kit'
 import { Dispatcher } from '../dispatcher'
 import {
+  getCheckRunConclusionAdjective,
   ICombinedRefCheck,
   IRefCheck,
-  isSuccess,
 } from '../../lib/ci-checks/ci-checks'
 import { IAPIWorkflowJobStep } from '../../lib/api'
 
@@ -20,6 +21,9 @@ interface ICIStatusProps {
 
   /** The GitHub repository to use when looking up commit status. */
   readonly repository: GitHubRepository
+
+  /** The local repository whose account is used to retrieve checks. */
+  readonly localRepository: Repository
 
   /** The commit ref (can be a SHA or a Git ref) for which to fetch status. */
   readonly commitRef: string
@@ -37,12 +41,13 @@ export class CIStatus extends React.PureComponent<
   ICIStatusProps,
   ICIStatusState
 > {
-  private statusSubscription: DisposableLike | null = null
+  private statusSubscription: Disposable | null = null
 
   public constructor(props: ICIStatusProps) {
     super(props)
     const check = props.dispatcher.tryGetCommitStatus(
       this.props.repository,
+      this.props.localRepository,
       this.props.commitRef
     )
     this.state = {
@@ -56,6 +61,7 @@ export class CIStatus extends React.PureComponent<
 
     this.statusSubscription = this.props.dispatcher.subscribeToCommitStatus(
       this.props.repository,
+      this.props.localRepository,
       this.props.commitRef,
       this.onStatus
     )
@@ -72,14 +78,16 @@ export class CIStatus extends React.PureComponent<
     // Re-subscribe if we're being reused to show a different status.
     if (
       this.props.repository !== prevProps.repository ||
+      this.props.localRepository !== prevProps.localRepository ||
       this.props.commitRef !== prevProps.commitRef
     ) {
-      this.setState({
-        check: this.props.dispatcher.tryGetCommitStatus(
+      this.onStatus(
+        this.props.dispatcher.tryGetCommitStatus(
           this.props.repository,
+          this.props.localRepository,
           this.props.commitRef
-        ),
-      })
+        )
+      )
       this.subscribe()
     }
   }
@@ -115,7 +123,7 @@ export class CIStatus extends React.PureComponent<
           this.props.className
         )}
         symbol={getSymbolForCheck(check)}
-        title={getRefCheckSummary(check)}
+        title={`Checks: ${getCheckRunConclusionAdjective(check.conclusion)}`}
       />
     )
   }
@@ -189,21 +197,4 @@ export function getClassNameForLogStep(logStep: IAPIWorkflowJobStep): string {
 
   // Pending
   return ''
-}
-
-/**
- * Convert the combined check to an app-friendly string.
- */
-export function getRefCheckSummary(check: ICombinedRefCheck): string {
-  if (check.checks.length === 1) {
-    const { name, description } = check.checks[0]
-    return `${name}: ${description}`
-  }
-
-  const successCount = check.checks.reduce(
-    (acc, cur) => acc + (isSuccess(cur) ? 1 : 0),
-    0
-  )
-
-  return `${successCount}/${check.checks.length} checks OK`
 }

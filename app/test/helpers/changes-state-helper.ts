@@ -16,12 +16,24 @@ export function createState<K extends keyof IChangesState>(
       diff: null,
     },
     commitMessage: DefaultCommitMessage,
+    commitMode: 'manual',
+    pushAfterCommit: false,
+    assistedCommit: { kind: 'idle' },
+    assistedCommitAvailable: false,
     showCoAuthoredBy: false,
     coAuthors: [],
     conflictState: null,
     stashEntry: null,
     currentBranchProtected: false,
     currentRepoRulesInfo: new RepoRulesInfo(),
+    fileListFilter: {
+      filterText: '',
+      isIncludedInCommit: false,
+      isNewFile: false,
+      isModifiedFile: false,
+      isDeletedFile: false,
+      isExcludedFromCommit: false,
+    },
   }
 
   return merge(baseChangesState, pick)

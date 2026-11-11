@@ -40,7 +40,7 @@
         }
 
         .pending {
-          color: $yellow-700;
+          color: darken($yellow-700, 10%);
         }
       }
 
@@ -63,6 +63,12 @@
         margin-left: auto;
         width: 30px;
         height: 30px;
+      }
+
+      .completeness-indicator-success,
+      .completeness-indicator-error {
+        background-color: var(--background-color);
+        border-radius: 50%;
       }
 
       .completeness-indicator-success {
@@ -88,7 +94,7 @@
         > .waiting,
         > .requested,
         > .pending {
-          fill: $yellow-700;
+          fill: darken($yellow-700, 10%);
         }
 
         > .success {

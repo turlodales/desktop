@@ -1,4 +1,12 @@
+import { Account } from '../models/account'
+
 const Disable = false
+
+/**
+ * Opt in new OAuth authorizations for beta and development features.
+ * Other builds use Central's rollout; existing credentials keep renewing.
+ */
+export const enableShortLivedTokens = () => enableBetaFeatures()
 
 /**
  * Enables the application to opt-in for preview features based on runtime
@@ -28,10 +36,16 @@ function enableBetaFeatures(): boolean {
   return enableDevelopmentFeatures() || __RELEASE_CHANNEL__ === 'beta'
 }
 
-/** Should git pass `--recurse-submodules` when performing operations? */
-export function enableRecurseSubmodulesFlag(): boolean {
-  return true
-}
+/**
+ * Should the app show menu items that are used for testing various parts of the
+ * UI
+ *
+ * For our own testing purposes, this will likely remain enabled. But, sometimes
+ * we may want to create a test release for a user to test a fix in which case
+ * they should not need access to the test menu items.
+ */
+export const enableTestMenuItems = () =>
+  enableDevelopmentFeatures() || __RELEASE_CHANNEL__ === 'test'
 
 export function enableReadmeOverwriteWarning(): boolean {
   return enableBetaFeatures()
@@ -61,16 +75,6 @@ export function enableUpdateFromEmulatedX64ToARM64(): boolean {
   return enableBetaFeatures()
 }
 
-/** Should we allow resetting to a previous commit? */
-export function enableResetToCommit(): boolean {
-  return true
-}
-
-/** Should we allow checking out a single commit? */
-export function enableCheckoutCommit(): boolean {
-  return true
-}
-
 /** Should we show previous tags as suggestions? */
 export function enablePreviousTagSuggestions(): boolean {
   return enableBetaFeatures()
@@ -81,7 +85,64 @@ export function enablePullRequestQuickView(): boolean {
   return enableDevelopmentFeatures()
 }
 
+/** Should we support image previews for dds files? */
+export function enableImagePreviewsForDDSFiles(): boolean {
+  return enableBetaFeatures()
+}
+
 export const enableCustomIntegration = () => true
 
-export const enableResizingToolbarButtons = enableBetaFeatures
-export const enableGitConfigParameters = enableBetaFeatures
+export const enableResizingToolbarButtons = () => true
+
+export const enableCommitMessageGeneration = (account: Account) => {
+  return (
+    (account.features ?? []).includes(
+      'desktop_copilot_generate_commit_message'
+    ) &&
+    // IMPORTANT: Do not remove this feature flag without replacing its usages
+    // with a check for the `isCopilotDesktopEnabled` property on the account.
+    account.isCopilotDesktopEnabled
+  )
+}
+
+export const enableCopilotSdkCommitMessageGeneration = (account: Account) => {
+  // Enabled for all users in beta and development channels, and for users with
+  // the feature flag enabled in production.
+  return (
+    enableBetaFeatures() ||
+    (account.features ?? []).includes(
+      'desktop_enable_copilot_sdk_commit_message_generation'
+    )
+  )
+}
+
+/**
+ * Should we offer the Copilot-assisted commit mode, where Copilot splits the
+ * selected changes into commits and writes their messages?
+ */
+export const enableCopilotAssistedCommit = enableDevelopmentFeatures
+
+/** Should we enable Copilot-powered merge conflict resolution? */
+export const enableCopilotConflictResolution = () => true
+
+export function enableAccessibleListToolTips(): boolean {
+  return enableBetaFeatures()
+}
+
+export const enableHooksEnvironment = () => true
+
+export const enableHooksByDefault = enableBetaFeatures
+
+export const enableFormattingPreferences = () => true
+
+/** Should the app enable worktree support? */
+export const enableWorktreeSupport = () => true
+
+/** Should the app offer handoff to the GitHub Copilot app? */
+export const enableCopilotAppHandoff = () =>
+  (__DARWIN__ || __WIN32__) && enableBetaFeatures()
+
+/** Should stats be sent to the new telemetry endpoint? */
+export function enableNewStatsEndpoint(): boolean {
+  return true
+}

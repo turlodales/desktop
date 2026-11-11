@@ -4,6 +4,8 @@ import { Author, isKnownAuthor } from '../../../models/author'
 import { Octicon, syncClockwise } from '../../octicons'
 import * as octicons from '../../octicons/octicons.generated'
 import { getFullTextForAuthor, getDisplayTextForAuthor } from './author-text'
+import { Tooltip } from '../tooltip'
+import { createObservableRef } from '../observable-ref'
 
 interface IAuthorHandleProps {
   /** Author to render */
@@ -26,6 +28,9 @@ interface IAuthorHandleProps {
 
   /** Whether the input element has the focus */
   readonly isInputFocused: boolean
+
+  /** Whether the author may be removed. */
+  readonly readOnly: boolean
 
   /** Callback to invoke when the user presses a key */
   readonly onKeyDown: (
@@ -53,17 +58,24 @@ interface IAuthorHandleProps {
 }
 
 export class AuthorHandle extends React.Component<IAuthorHandleProps> {
+  private readonly containerRef = createObservableRef<HTMLDivElement>()
+
   private getAriaLabel() {
     const { author } = this.props
+    const instruction = this.props.readOnly
+      ? ''
+      : 'press backspace or delete to remove'
     if (isKnownAuthor(author)) {
-      return `${getFullTextForAuthor(
-        author
-      )} press backspace or delete to remove`
+      return `${getFullTextForAuthor(author)}${
+        instruction ? ` ${instruction}` : ''
+      }`
     }
 
     const isError = author.state === 'error'
     const stateAriaLabel = isError ? 'user not found' : 'searching'
-    return `${author.username}, ${stateAriaLabel}, press backspace or delete to remove`
+    return `${author.username}, ${stateAriaLabel}${
+      instruction ? `, ${instruction}` : ''
+    }`
   }
 
   private getClassName() {
@@ -114,20 +126,24 @@ export class AuthorHandle extends React.Component<IAuthorHandleProps> {
 
   public render() {
     const { author, isFocused } = this.props
+    const title = this.getTitle()
 
     return (
-      // eslint-disable-next-line github/a11y-no-title-attribute
       <div
         className={this.getClassName()}
-        title={this.getTitle()}
         role="option"
         aria-label={this.getAriaLabel()}
         aria-selected={isFocused}
+        aria-disabled={this.props.readOnly || undefined}
         onKeyDown={this.onKeyDown}
         onClick={this.onHandleClick}
         tabIndex={this.getTabIndex()}
+        ref={this.containerRef}
         onFocus={this.onFocus}
       >
+        {title && (
+          <Tooltip target={this.containerRef}>{this.getTitle()}</Tooltip>
+        )}
         <span aria-hidden="true">{getDisplayTextForAuthor(author)}</span>
         {!isKnownAuthor(author) && (
           <Octicon
@@ -135,7 +151,12 @@ export class AuthorHandle extends React.Component<IAuthorHandleProps> {
             symbol={author.state === 'error' ? octicons.stop : syncClockwise}
           />
         )}
-        <button onClick={this.onRemoveClick} tabIndex={-1}>
+        <button
+          onClick={this.onRemoveClick}
+          tabIndex={-1}
+          disabled={this.props.readOnly}
+          aria-label={`Remove ${getDisplayTextForAuthor(author)}`}
+        >
           <Octicon className="delete" symbol={octicons.x} />
         </button>
       </div>

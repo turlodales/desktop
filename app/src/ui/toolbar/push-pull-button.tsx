@@ -30,6 +30,7 @@ import { ForcePushBranchState } from '../../lib/rebase'
 import { PushPullButtonDropDown } from './push-pull-button-dropdown'
 import { AriaLiveContainer } from '../accessibility/aria-live-container'
 import { enableResizingToolbarButtons } from '../../lib/feature-flag'
+import { formatCompactNumber } from '../../lib/format-number'
 
 export const DropdownItemClassName = 'push-pull-dropdown-item'
 
@@ -45,6 +46,7 @@ interface IPushPullButtonProps {
 
   /** Is a push/pull/fetch in progress? */
   readonly networkActionInProgress: boolean
+  readonly disabled?: boolean
 
   /** The date of the last fetch. */
   readonly lastFetched: Date | null
@@ -138,7 +140,7 @@ function renderAheadBehind(aheadBehind: IAheadBehind, numTagsToPush: number) {
   if (ahead > 0 || numTagsToPush > 0) {
     content.push(
       <span key="ahead">
-        {ahead + numTagsToPush}
+        {formatCompactNumber(ahead + numTagsToPush)}
         <Octicon symbol={octicons.arrowUp} />
       </span>
     )
@@ -147,7 +149,7 @@ function renderAheadBehind(aheadBehind: IAheadBehind, numTagsToPush: number) {
   if (behind > 0) {
     content.push(
       <span key="behind">
-        {behind}
+        {formatCompactNumber(behind)}
         <Octicon symbol={octicons.arrowDown} />
       </span>
     )
@@ -420,6 +422,7 @@ export class PushPullButton extends React.Component<
           onResize={this.onResize}
           maximumWidth={this.props.pushPullButtonWidth.max}
           minimumWidth={this.props.pushPullButtonWidth.min}
+          description="Push pull button"
         >
           {this.renderButton()}
           <span id="push-pull-button-state">
@@ -431,6 +434,17 @@ export class PushPullButton extends React.Component<
   }
 
   private renderButton() {
+    if (this.props.disabled) {
+      return (
+        <ToolbarButton
+          {...this.defaultButtonProps()}
+          icon={octicons.gitCommit}
+          title="Local commit run"
+          description="Finish or cancel before syncing"
+          disabled={true}
+        />
+      )
+    }
     const {
       progress,
       networkActionInProgress,
@@ -454,7 +468,7 @@ export class PushPullButton extends React.Component<
     }
 
     if (tipState === TipState.Unborn) {
-      return this.unbornRepositoryButton()
+      return this.fetchButton(remoteName, lastFetched, this.fetch)
     }
 
     if (tipState === TipState.Detached) {
@@ -532,18 +546,6 @@ export class PushPullButton extends React.Component<
         icon={octicons.upload}
         style={ToolbarButtonStyle.Subtitle}
         onClick={onClick}
-      />
-    )
-  }
-
-  private unbornRepositoryButton() {
-    return (
-      <ToolbarButton
-        {...this.defaultButtonProps()}
-        title="Publish branch"
-        description="Cannot publish unborn HEAD"
-        icon={octicons.upload}
-        disabled={true}
       />
     )
   }

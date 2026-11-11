@@ -1,5 +1,9 @@
 import * as React from 'react'
-import { Account } from '../../models/account'
+import {
+  Account,
+  isDotComAccount,
+  isEnterpriseAccount,
+} from '../../models/account'
 import { IAvatarUser } from '../../models/avatar'
 import { lookupPreferredEmail } from '../../lib/email'
 import { assertNever } from '../../lib/fatal-error'
@@ -8,10 +12,10 @@ import { Row } from '../lib/row'
 import { DialogContent, DialogPreferredFocusClassName } from '../dialog'
 import { Avatar } from '../lib/avatar'
 import { CallToAction } from '../lib/call-to-action'
+import { groupAccountsByHost } from '../../lib/group-accounts-by-host'
 
 interface IAccountsProps {
-  readonly dotComAccount: Account | null
-  readonly enterpriseAccount: Account | null
+  readonly accounts: ReadonlyArray<Account>
 
   readonly onDotComSignIn: () => void
   readonly onEnterpriseSignIn: () => void
@@ -25,21 +29,61 @@ enum SignInType {
 
 export class Accounts extends React.Component<IAccountsProps, {}> {
   public render() {
+    const { accounts } = this.props
+    const dotComAccounts = accounts.filter(isDotComAccount)
+
     return (
       <DialogContent className="accounts-tab">
-        <h2>GitHub.com</h2>
-        {this.props.dotComAccount
-          ? this.renderAccount(this.props.dotComAccount, SignInType.DotCom)
-          : this.renderSignIn(SignInType.DotCom)}
+        <div className="accounts-section">
+          <h2>GitHub.com</h2>
+          {dotComAccounts.map(account =>
+            this.renderAccount(account, SignInType.DotCom)
+          )}
+          {dotComAccounts.length === 0 ? (
+            this.renderSignIn(SignInType.DotCom)
+          ) : (
+            <Button onClick={this.props.onDotComSignIn}>
+              Add GitHub.com account
+            </Button>
+          )}
+        </div>
 
-        <h2>GitHub Enterprise</h2>
-        {this.props.enterpriseAccount
-          ? this.renderAccount(
-              this.props.enterpriseAccount,
-              SignInType.Enterprise
-            )
-          : this.renderSignIn(SignInType.Enterprise)}
+        <div className="accounts-section">
+          <h2>GitHub Enterprise</h2>
+          {this.renderMultipleEnterpriseAccounts()}
+        </div>
       </DialogContent>
+    )
+  }
+
+  private renderMultipleEnterpriseAccounts() {
+    const enterpriseAccounts = this.props.accounts.filter(isEnterpriseAccount)
+
+    if (enterpriseAccounts.length === 0) {
+      return this.renderSignIn(SignInType.Enterprise)
+    }
+
+    return (
+      <>
+        {groupAccountsByHost(enterpriseAccounts).map(([host, accounts]) => {
+          const headingId = `enterprise-accounts-${host}`
+          return (
+            <section
+              key={host}
+              className="enterprise-host"
+              aria-labelledby={headingId}
+            >
+              <h3 id={headingId}>{host}</h3>
+              {accounts.map(account =>
+                this.renderAccount(account, SignInType.Enterprise)
+              )}
+            </section>
+          )
+        })}
+        <Button onClick={this.props.onEnterpriseSignIn}>
+          Add GitHub Enterprise account
+        </Button>
+      </>
     )
   }
 
@@ -51,30 +95,28 @@ export class Accounts extends React.Component<IAccountsProps, {}> {
       endpoint: account.endpoint,
     }
 
-    const accountTypeLabel =
-      type === SignInType.DotCom ? 'GitHub.com' : 'GitHub Enterprise'
-
-    const accounts = [
-      ...(this.props.dotComAccount ? [this.props.dotComAccount] : []),
-      ...(this.props.enterpriseAccount ? [this.props.enterpriseAccount] : []),
-    ]
-
     // The DotCom account is shown first, so its sign in/out button should be
     // focused initially when the dialog is opened.
     const className =
       type === SignInType.DotCom ? DialogPreferredFocusClassName : undefined
 
     return (
-      <Row className="account-info">
+      <Row
+        key={JSON.stringify([
+          account.endpoint.toLowerCase(),
+          account.login.toLowerCase(),
+        ])}
+        className="account-info"
+      >
         <div className="user-info-container">
-          <Avatar accounts={accounts} user={avatarUser} />
+          <Avatar accounts={this.props.accounts} user={avatarUser} />
           <div className="user-info">
             <div className="name">{account.name}</div>
             <div className="login">@{account.login}</div>
           </div>
         </div>
         <Button onClick={this.logout(account)} className={className}>
-          {__DARWIN__ ? 'Sign Out of' : 'Sign out of'} {accountTypeLabel}
+          {__DARWIN__ ? 'Sign Out' : 'Sign out'}
         </Button>
       </Row>
     )
